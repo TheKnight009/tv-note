@@ -63,7 +63,7 @@ h1 { margin: 0; font-weight: 500; font-size: 22px; letter-spacing: -0.01em; }
 .status.ok .dot { background: var(--ok); }
 .status.bad .dot { background: var(--danger); }
 
-.tabs { display: grid; grid-template-columns: 1fr 1fr; background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 4px; }
+.tabs { display: grid; grid-template-columns: 1fr 1fr 1fr; background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 4px; }
 .tabs button { appearance: none; border: 0; background: transparent; color: var(--muted); font: 500 15px var(--font); padding: 10px; border-radius: 10px; }
 .tabs button[aria-selected="true"] { background: var(--ink); color: var(--bg); }
 
@@ -110,6 +110,12 @@ button:focus-visible, .swatch:focus-visible { outline: 2px solid var(--accent); 
 .toast.ok { color: var(--ok); }
 .toast.bad { color: var(--danger); }
 
+.photo-wrap { position: relative; border-radius: 16px; overflow: hidden; background: var(--screen); box-shadow: inset 0 0 0 1px #ffffff1a; }
+canvas#photoPreview { display: block; width: 100%; aspect-ratio: 16 / 9; max-width: 100%; touch-action: none; cursor: grab; }
+.photo-empty { position: absolute; inset: 0; display: grid; place-items: center; text-align: center; color: #ffffffa6; font-size: 15px; padding: 16px; }
+.photo-empty strong { display: block; color: #fff; font-weight: 500; font-size: 17px; margin-bottom: 4px; }
+.pick { display: block; text-align: center; appearance: none; border: 1px solid var(--line); background: var(--surface); color: var(--ink); font: 500 15px var(--font); padding: 12px 16px; border-radius: 12px; cursor: pointer; }
+.hint { font-size: 13px; color: var(--muted); margin: 0; }
 .unpaired { display: grid; gap: 10px; padding: 22px; border: 1px dashed var(--line); border-radius: 16px; background: var(--surface); }
 .unpaired p { margin: 0; color: var(--muted); }
 @media (prefers-reduced-motion: no-preference) { .send { transition: transform .12s ease; } .send:active { transform: scale(.98); } }
@@ -131,6 +137,7 @@ button:focus-visible, .swatch:focus-visible { outline: 2px solid var(--accent); 
     <div class="tabs" role="tablist">
       <button role="tab" id="tabWrite" aria-selected="true" aria-controls="paneWrite">Write</button>
       <button role="tab" id="tabDraw" aria-selected="false" aria-controls="paneDraw">Draw</button>
+      <button role="tab" id="tabPhoto" aria-selected="false" aria-controls="panePhoto">Photo</button>
     </div>
 
     <section id="paneWrite" role="tabpanel" class="field">
@@ -157,7 +164,21 @@ button:focus-visible, .swatch:focus-visible { outline: 2px solid var(--accent); 
       </div>
     </section>
 
-    <div class="row">
+    <section id="panePhoto" role="tabpanel" hidden>
+      <div class="photo-wrap">
+        <canvas id="photoPreview" width="1920" height="1080" aria-label="How the photo will fill the TV"></canvas>
+        <label class="photo-empty" id="photoEmpty" for="photoFile"><span><strong>Choose a photo</strong>It becomes the TV's home screen background</span></label>
+      </div>
+      <div class="tools" style="margin-top:12px">
+        <label class="pick" for="photoFile" id="photoPickLabel">Choose photo</label>
+        <input type="file" id="photoFile" accept="image/*" hidden>
+        <span class="spacer"></span>
+        <button class="ghost" id="removeBg">Remove background</button>
+      </div>
+      <p class="hint" style="margin-top:10px" id="photoHint">The frame shows exactly what the TV will show. Drag the photo to change the crop.</p>
+    </section>
+
+    <div class="row" id="fromRow">
       <div class="field">
         <label for="from">Your name (optional)</label>
         <input type="text" id="from" maxlength="24" placeholder="Shown on the TV" autocomplete="nickname">
@@ -231,11 +252,15 @@ button:focus-visible, .swatch:focus-visible { outline: 2px solid var(--accent); 
     mode = m;
     $("tabWrite").setAttribute("aria-selected", m === "write");
     $("tabDraw").setAttribute("aria-selected", m === "draw");
-    $("paneWrite").hidden = m !== "write"; $("paneDraw").hidden = m !== "draw";
+    $("tabPhoto").setAttribute("aria-selected", m === "photo");
+    $("paneWrite").hidden = m !== "write"; $("paneDraw").hidden = m !== "draw"; $("panePhoto").hidden = m !== "photo";
+    $("fromRow").hidden = m === "photo";
+    $("send").textContent = m === "photo" ? "Set as TV background" : "Send to TV";
     store.set("tvnote.mode", m); updateSend();
   }
   $("tabWrite").onclick = () => setMode("write");
   $("tabDraw").onclick = () => setMode("draw");
+  $("tabPhoto").onclick = () => setMode("photo");
 
   // Text
   const text = $("text");
@@ -296,11 +321,11 @@ button:focus-visible, .swatch:focus-visible { outline: 2px solid var(--accent); 
   }
 
   function updateSend() {
-    $("send").disabled = busy || (mode === "write" ? !text.value.trim() : strokes.length === 0);
+    $("send").disabled = busy || (mode === "write" ? !text.value.trim() : mode === "draw" ? strokes.length === 0 : !photo);
   }
   let busy = false;
   async function publish(payload, okText) {
-    busy = true; updateSend(); $("clearTv").disabled = true; toast("", "Sending…");
+    busy = true; updateSend(); $("clearTv").disabled = true; toast("", payload.kind === "photo" ? "Sending photo…" : "Sending…");
     try {
       const body = await seal(payload);
       const res = await fetch(RELAY + pairing.topic, { method: "PUT", body });
@@ -317,6 +342,12 @@ button:focus-visible, .swatch:focus-visible { outline: 2px solid var(--accent); 
 
   $("send").onclick = async () => {
     const base = { v: 1, from: from.value.trim().slice(0, 24), ts: Date.now() };
+    if (mode === "photo") {
+      const img = await exportPhoto();
+      if (!img) { toast("bad", "That photo couldn't be prepared. Try another one."); return; }
+      await publish({ v: 1, kind: "photo", img, ts: Date.now() }, "New TV background set");
+      return;
+    }
     if (mode === "write") {
       if (await publish({ ...base, kind: "text", text: text.value.trim() }, "On the TV")) { text.value = ""; store.set("tvnote.draft", ""); $("count").textContent = 0; updateSend(); }
     } else {
@@ -330,7 +361,65 @@ button:focus-visible, .swatch:focus-visible { outline: 2px solid var(--accent); 
     await publish({ v: 1, kind: "clear", ts: Date.now() }, "Cleared the TV");
   };
 
-  setMode(store.get("tvnote.mode") === "draw" ? "draw" : "write");
+  // Photo: cover-crop to the TV's 16:9, with a focal point the viewer drags.
+  const prev = $("photoPreview"), pctx = prev.getContext("2d");
+  let photo = null, fx = 0.5, fy = 0.5;
+  function cropRect(iw, ih, W, H) {
+    const scale = Math.max(W / iw, H / ih), sw = W / scale, sh = H / scale;
+    return { sx: (iw - sw) * fx, sy: (ih - sh) * fy, sw, sh };
+  }
+  function drawPhoto(c, W, H) {
+    const g = c.getContext("2d"); const r = cropRect(photo.naturalWidth, photo.naturalHeight, W, H);
+    g.imageSmoothingQuality = "high"; g.drawImage(photo, r.sx, r.sy, r.sw, r.sh, 0, 0, W, H);
+  }
+  function renderPhoto() {
+    pctx.clearRect(0, 0, prev.width, prev.height);
+    $("photoEmpty").hidden = !!photo;
+    if (photo) drawPhoto(prev, prev.width, prev.height);
+    $("photoPickLabel").textContent = photo ? "Choose another" : "Choose photo";
+    updateSend();
+  }
+  $("photoFile").addEventListener("change", async () => {
+    const f = $("photoFile").files[0]; if (!f) return;
+    const url = URL.createObjectURL(f); const img = new Image();
+    img.src = url;
+    try { await img.decode(); photo = img; fx = 0.5; fy = 0.5; toast("", ""); }
+    catch { toast("bad", "That file couldn't be opened as a photo. Try a JPEG or PNG."); }
+    renderPhoto();
+  });
+  let drag = null;
+  prev.addEventListener("pointerdown", (e) => { if (!photo) return; prev.setPointerCapture(e.pointerId); drag = { x: e.clientX, y: e.clientY, fx, fy }; });
+  prev.addEventListener("pointermove", (e) => {
+    if (!drag) return;
+    const rect = prev.getBoundingClientRect(); const r = cropRect(photo.naturalWidth, photo.naturalHeight, prev.width, prev.height);
+    const spareX = photo.naturalWidth - r.sw, spareY = photo.naturalHeight - r.sh;
+    const pxPerCss = r.sw / rect.width;   // image pixels per screen pixel
+    if (spareX > 0) fx = Math.min(1, Math.max(0, drag.fx - (e.clientX - drag.x) * pxPerCss / spareX));
+    if (spareY > 0) fy = Math.min(1, Math.max(0, drag.fy - (e.clientY - drag.y) * pxPerCss / spareY));
+    renderPhoto();
+  });
+  const endDrag = () => { drag = null; };
+  prev.addEventListener("pointerup", endDrag); prev.addEventListener("pointercancel", endDrag);
+  async function exportPhoto() {
+    if (!photo) return null;
+    const c = document.createElement("canvas"); c.width = 1920; c.height = 1080; drawPhoto(c, 1920, 1080);
+    for (const q of [0.85, 0.75, 0.6]) {
+      const data = c.toDataURL("image/jpeg", q).split(",")[1];
+      if (data.length < 2000000) return data;
+    }
+    return null;
+  }
+  let removeArmed = null;
+  $("removeBg").onclick = async () => {
+    if (!removeArmed) { $("removeBg").textContent = "Tap to confirm"; removeArmed = setTimeout(() => { removeArmed = null; $("removeBg").textContent = "Remove background"; }, 3000); return; }
+    clearTimeout(removeArmed); removeArmed = null; $("removeBg").textContent = "Remove background";
+    await publish({ v: 1, kind: "unphoto", ts: Date.now() }, "Background removed");
+  };
+
+  const linkMode = new URLSearchParams(location.hash.slice(1)).get("p");
+  const startMode = ["write", "draw", "photo"].includes(linkMode) ? linkMode : store.get("tvnote.mode");
+  setMode(["draw", "photo"].includes(startMode) ? startMode : "write");
+  renderPhoto();
   redraw();
 })();
 </script>
